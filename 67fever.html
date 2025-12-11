@@ -26,7 +26,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     // Lucide React Icons (inline SVG components)
     const RotateCcw = ({ size = 24, strokeWidth = 2 }) => (
@@ -68,6 +68,32 @@
       const [isTransitioning, setIsTransitioning] = useState(false);
       const [isMobile, setIsMobile] = useState(false);
 
+      // refs per tenere gli URL dei suoni
+      const guessedAudioRef = useRef([]);
+      const wrongAudioRef = useRef([]);
+      const activeAudioRef = useRef(null);
+      const lastGuessedIndexRef = useRef(-1);
+      const lastWrongIndexRef = useRef(-1);
+
+      // stoppa e resetta l'audio attivo, se esiste
+      const stopActiveAudio = () => {
+        try {
+          const a = activeAudioRef.current;
+          if (a) {
+            a.pause();
+            try { a.currentTime = 0; } catch (e) {}
+          }
+        } catch (e) {}
+        activeAudioRef.current = null;
+      };
+
+      // cleanup quando il componente smonta
+      useEffect(() => {
+        return () => {
+          stopActiveAudio();
+        };
+      }, []);
+
       useEffect(() => {
         const checkMobile = () => {
           const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
@@ -77,6 +103,101 @@
         checkMobile();
         window.addEventListener('resize', checkMobile);
         return () => window.removeEventListener('resize', checkMobile);
+      }, []);
+
+      // carica suoni dalle cartelle ./sounds/guessed e ./sounds/wrong
+      useEffect(() => {
+        // lista fissa dei file wrong
+        const wrongList = [
+          './sounds/wrong/wrong1.mp3',
+          './sounds/wrong/wrong2.mp3',
+          './sounds/wrong/wrong3.mp3',
+          './sounds/wrong/wrong4.mp3',
+          './sounds/wrong/wrong5.mp3',
+          './sounds/wrong/wrong6.mp3'
+        ];
+
+        // guessed rimane dinamico come prima
+        const timeoutMs = 1200;
+        const maxAllowed = 256;
+        const winBase = 'file:///C:/Users/Utente/Desktop/Giochi/67Fever';
+
+        const tryLoadAudio = (path) => {
+          return new Promise((resolve) => {
+            try {
+              const a = new Audio();
+              let settled = false;
+              const onSuccess = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(true);
+              };
+              const onError = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(false);
+              };
+              const to = setTimeout(() => onError(), timeoutMs);
+              const cleanup = () => {
+                clearTimeout(to);
+                a.removeEventListener('canplaythrough', onSuccess);
+                a.removeEventListener('loadedmetadata', onSuccess);
+                a.removeEventListener('error', onError);
+              };
+              a.addEventListener('canplaythrough', onSuccess);
+              a.addEventListener('loadedmetadata', onSuccess);
+              a.addEventListener('error', onError);
+              a.src = path;
+              try { a.load(); } catch (e) {}
+            } catch (e) {
+              resolve(false);
+            }
+          });
+        };
+
+        const existsIndex = async (folder, i) => {
+          const rel = `./sounds/${folder}/${folder}${i}.mp3`;
+          const abs = `${winBase}/sounds/${folder}/${folder}${i}.mp3`;
+          // eslint-disable-next-line no-await-in-loop
+          if (await tryLoadAudio(rel)) return rel;
+          // eslint-disable-next-line no-await-in-loop
+          if (await tryLoadAudio(abs)) return abs;
+          return null;
+        };
+
+        const findCountSequential = async (folder) => {
+          let count = 0;
+          for (let i = 1; i <= maxAllowed; i++) {
+            // eslint-disable-next-line no-await-in-loop
+            const found = await existsIndex(folder, i);
+            if (found) count++;
+            else break;
+          }
+          return count;
+        };
+
+        const buildList = async (folder, count) => {
+          const list = [];
+          for (let i = 1; i <= count; i++) {
+            // eslint-disable-next-line no-await-in-loop
+            const p = await existsIndex(folder, i);
+            if (p) list.push(p);
+          }
+          return list;
+        };
+
+        (async () => {
+          try {
+            const guessedCount = await findCountSequential('guessed');
+            guessedAudioRef.current = guessedCount > 0 ? await buildList('guessed', guessedCount) : [];
+            wrongAudioRef.current = wrongList;
+          } catch (e) {
+            guessedAudioRef.current = [];
+            wrongAudioRef.current = wrongList;
+          }
+        })();
       }, []);
 
       const difficultySettings = {
@@ -213,12 +334,52 @@
         setNumbers(nums);
       };
 
+      // riproduci un suono a caso dalla lista corretta
+      const playRandomSound = (isCorrect) => {
+        const list = isCorrect ? guessedAudioRef.current : wrongAudioRef.current;
+        if (!list || list.length === 0) return;
+        // scegli un indice casuale diverso dall'ultimo riprodotto (se possibile)
+        const lastRef = isCorrect ? lastGuessedIndexRef : lastWrongIndexRef;
+        let idx;
+        if (list.length === 1) {
+          idx = 0;
+        } else {
+          let attempts = 0;
+          do {
+            idx = Math.floor(Math.random() * list.length);
+            attempts++;
+          } while (idx === lastRef.current && attempts < 6);
+        }
+        lastRef.current = idx;
+        const path = list[idx];
+        try {
+          stopActiveAudio();
+          const a = new Audio(path);
+          // guessed2.mp3 a metà volume, tutti gli altri a 0.9
+          if (isCorrect && path.includes('guessed2.mp3')) {
+            a.volume = 0.45;
+          } else {
+            a.volume = 0.9;
+          }
+          activeAudioRef.current = a;
+          a.addEventListener('ended', () => {
+            if (activeAudioRef.current === a) activeAudioRef.current = null;
+          });
+          a.play().catch(() => {
+            if (activeAudioRef.current === a) activeAudioRef.current = null;
+          });
+        } catch (e) {
+          // ignore
+        }
+      };
+
       const handleNumberClick = (num) => {
         if (!gameActive || clickedNumbers.has(num.id) || isTransitioning) return;
 
         setIsTransitioning(true);
 
         if (num.value === 67) {
+          playRandomSound(true); // suono "guessed"
           setScore(score + 10);
           setCelebration(true);
           setTimeout(() => setCelebration(false), 600);
@@ -228,6 +389,7 @@
             setArcadeNumCount(arcadeNumCount + 2);
           }
         } else {
+          playRandomSound(false); // suono "wrong"
           setScore(Math.max(0, score - 2));
         }
 
@@ -239,6 +401,23 @@
           setIsTransitioning(false);
         }, 800);
       };
+
+      // Carica bestScores da localStorage all'avvio
+      useEffect(() => {
+        try {
+          const saved = localStorage.getItem('67fever_bestScores');
+          if (saved) {
+            setBestScores(JSON.parse(saved));
+          }
+        } catch (e) {}
+      }, []);
+
+      // Salva bestScores su ogni modifica
+      useEffect(() => {
+        try {
+          localStorage.setItem('67fever_bestScores', JSON.stringify(bestScores));
+        } catch (e) {}
+      }, [bestScores]);
 
       const endGame = () => {
         setGameActive(false);
